@@ -81,7 +81,9 @@ func (c *serverCodec) WriteResponse(response *rpc.Response, thriftStruct interfa
 		}
 		thriftStruct = &ApplicationException{response.Error, etype}
 	}
-	if err := c.protocol.WriteMessageBegin(c.transport, response.ServiceMethod, mtype, int32(response.Seq)); err != nil {
+
+	methodname := strings.TrimPrefix(response.ServiceMethod, "Thrift.")
+	if err := c.protocol.WriteMessageBegin(c.transport, methodname, mtype, int32(response.Seq)); err != nil {
 		return err
 	}
 	if err := EncodeStruct(c.transport, c.protocol, thriftStruct); err != nil {
