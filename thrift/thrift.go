@@ -1,13 +1,18 @@
+// Copyright 2012-2015 Samuel Stauffer. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 package thrift
 
 import (
 	"errors"
 	"fmt"
-	"io"
 	"reflect"
+	"sort"
 	"sync"
 )
 
+// Type identifiers for serialized Thrift
 const (
 	TypeStop   = 0
 	TypeVoid   = 1
@@ -28,6 +33,25 @@ const (
 	TypeUtf16  = 17
 )
 
+var TypeNames = map[int]string{
+	TypeStop:   "stop",
+	TypeVoid:   "void",
+	TypeBool:   "bool",
+	TypeByte:   "byte",
+	TypeDouble: "double",
+	TypeI16:    "i16",
+	TypeI32:    "i32",
+	TypeI64:    "i64",
+	TypeString: "string",
+	TypeStruct: "struct",
+	TypeMap:    "map",
+	TypeSet:    "set",
+	TypeList:   "list",
+	TypeUtf8:   "utf8",
+	TypeUtf16:  "utf16",
+}
+
+// Message types for RPC
 const (
 	MessageTypeCall      = 1
 	MessageTypeReply     = 2
@@ -35,12 +59,13 @@ const (
 	MessageTypeOneway    = 4
 )
 
+// Exception types for RPC responses
 const (
 	ExceptionUnknown            = 0
 	ExceptionUnknownMethod      = 1
 	ExceptionInvalidMessageType = 2
 	ExceptionWrongMethodName    = 3
-	ExceptionBadSequenceId      = 4
+	ExceptionBadSequenceID      = 4
 	ExceptionMissingResult      = 5
 	ExceptionInternalError      = 6
 	ExceptionProtocolError      = 7
@@ -72,7 +97,16 @@ func (e *UnsupportedValueError) Error() string {
 	return fmt.Sprintf("thrift: unsupported value (%+v): %s", e.Value, e.Str)
 }
 
-// Application level thrift exception
+type InvalidValueError struct {
+	Value reflect.Value
+	Str   string
+}
+
+func (e *InvalidValueError) Error() string {
+	return fmt.Sprintf("thrift: invalid value (%+v): %s", e.Value, e.Str)
+}
+
+// ApplicationException is an application level thrift exception
 type ApplicationException struct {
 	Message string `thrift:"1"`
 	Type    int32  `thrift:"2"`
@@ -87,8 +121,8 @@ func (e *ApplicationException) String() string {
 		typeStr = "Invalid Message Type"
 	case ExceptionWrongMethodName:
 		typeStr = "Wrong Method Name"
-	case ExceptionBadSequenceId:
-		typeStr = "Bad Sequence Id"
+	case ExceptionBadSequenceID:
+		typeStr = "Bad Sequence ID"
 	case ExceptionMissingResult:
 		typeStr = "Missing Result"
 	case ExceptionInternalError:
@@ -123,9 +157,8 @@ func fieldType(t reflect.Type) byte {
 		elemType := t.Elem()
 		if elemType.Kind() == reflect.Uint8 {
 			return TypeString
-		} else {
-			return TypeList
 		}
+		return TypeList
 	case reflect.Struct:
 		return TypeStruct
 	case reflect.String:
@@ -168,8 +201,9 @@ type encodeField struct {
 }
 
 type structMeta struct {
-	required uint64 // bitmap of required fields
-	fields   map[int]encodeField
+	required   uint64 // bitmap of required fields
+	orderedIds []int
+	fields     map[int]encodeField
 }
 
 var (
@@ -200,7 +234,7 @@ func encodeFields(t reflect.Type) structMeta {
 	n := v.NumField()
 	for i := 0; i < n; i++ {
 		f := t.Field(i)
-		if f.PkgPath != "" {
+		if f.PkgPath != "" && !f.Anonymous {
 			continue
 		}
 		if f.Anonymous {
@@ -238,176 +272,183 @@ func encodeFields(t reflect.Type) structMeta {
 			fs[ef.id] = ef
 		}
 	}
+
+	m.orderedIds = make([]int, 0, len(m.fields))
+	for idx := range m.fields {
+		m.orderedIds = append(m.orderedIds, idx)
+	}
+	sort.Ints(m.orderedIds)
+
 	encodeFieldsCache[t] = m
 	return m
 }
 
-func SkipValue(r io.Reader, p Protocol, thriftType byte) error {
+func SkipValue(r ProtocolReader, thriftType byte) error {
 	var err error
 	switch thriftType {
 	case TypeBool:
-		_, err = p.ReadBool(r)
+		_, err = r.ReadBool()
 	case TypeByte:
-		_, err = p.ReadByte(r)
+		_, err = r.ReadByte()
 	case TypeI16:
-		_, err = p.ReadI16(r)
+		_, err = r.ReadI16()
 	case TypeI32:
-		_, err = p.ReadI32(r)
+		_, err = r.ReadI32()
 	case TypeI64:
-		_, err = p.ReadI64(r)
+		_, err = r.ReadI64()
 	case TypeDouble:
-		_, err = p.ReadDouble(r)
+		_, err = r.ReadDouble()
 	case TypeString:
-		_, err = p.ReadBytes(r)
+		_, err = r.ReadBytes()
 	case TypeStruct:
-		if err := p.ReadStructBegin(r); err != nil {
+		if err := r.ReadStructBegin(); err != nil {
 			return err
 		}
 		for {
-			ftype, _, err := p.ReadFieldBegin(r)
+			ftype, _, err := r.ReadFieldBegin()
 			if err != nil {
 				return err
 			}
 			if ftype == TypeStop {
 				break
 			}
-			if err = SkipValue(r, p, ftype); err != nil {
+			if err = SkipValue(r, ftype); err != nil {
 				return err
 			}
-			if err = p.ReadFieldEnd(r); err != nil {
+			if err = r.ReadFieldEnd(); err != nil {
 				return err
 			}
 		}
-		return p.ReadStructEnd(r)
+		return r.ReadStructEnd()
 	case TypeMap:
-		keyType, valueType, n, err := p.ReadMapBegin(r)
+		keyType, valueType, n, err := r.ReadMapBegin()
 		if err != nil {
 			return err
 		}
 
 		for i := 0; i < n; i++ {
-			if err = SkipValue(r, p, keyType); err != nil {
+			if err = SkipValue(r, keyType); err != nil {
 				return err
 			}
-			if err = SkipValue(r, p, valueType); err != nil {
+			if err = SkipValue(r, valueType); err != nil {
 				return err
 			}
 		}
 
-		return p.ReadMapEnd(r)
+		return r.ReadMapEnd()
 	case TypeList:
-		valueType, n, err := p.ReadListBegin(r)
+		valueType, n, err := r.ReadListBegin()
 		if err != nil {
 			return err
 		}
 		for i := 0; i < n; i++ {
-			if err = SkipValue(r, p, valueType); err != nil {
+			if err = SkipValue(r, valueType); err != nil {
 				return err
 			}
 		}
-		return p.ReadListEnd(r)
+		return r.ReadListEnd()
 	case TypeSet:
-		valueType, n, err := p.ReadSetBegin(r)
+		valueType, n, err := r.ReadSetBegin()
 		if err != nil {
 			return err
 		}
 		for i := 0; i < n; i++ {
-			if err = SkipValue(r, p, valueType); err != nil {
+			if err = SkipValue(r, valueType); err != nil {
 				return err
 			}
 		}
-		return p.ReadSetEnd(r)
+		return r.ReadSetEnd()
 	}
 	return err
 }
 
-func ReadValue(r io.Reader, p Protocol, thriftType byte) (interface{}, error) {
+func ReadValue(r ProtocolReader, thriftType byte) (interface{}, error) {
 	switch thriftType {
 	case TypeBool:
-		return p.ReadBool(r)
+		return r.ReadBool()
 	case TypeByte:
-		return p.ReadByte(r)
+		return r.ReadByte()
 	case TypeI16:
-		return p.ReadI16(r)
+		return r.ReadI16()
 	case TypeI32:
-		return p.ReadI32(r)
+		return r.ReadI32()
 	case TypeI64:
-		return p.ReadI64(r)
+		return r.ReadI64()
 	case TypeDouble:
-		return p.ReadDouble(r)
+		return r.ReadDouble()
 	case TypeString:
-		return p.ReadString(r)
+		return r.ReadString()
 	case TypeStruct:
-		if err := p.ReadStructBegin(r); err != nil {
+		if err := r.ReadStructBegin(); err != nil {
 			return nil, err
 		}
 		st := make(map[int]interface{})
 		for {
-			ftype, id, err := p.ReadFieldBegin(r)
+			ftype, id, err := r.ReadFieldBegin()
 			if err != nil {
 				return st, err
 			}
 			if ftype == TypeStop {
 				break
 			}
-			v, err := ReadValue(r, p, ftype)
+			v, err := ReadValue(r, ftype)
 			if err != nil {
 				return st, err
 			}
 			st[int(id)] = v
-			if err = p.ReadFieldEnd(r); err != nil {
+			if err = r.ReadFieldEnd(); err != nil {
 				return st, err
 			}
 		}
-		return st, p.ReadStructEnd(r)
+		return st, r.ReadStructEnd()
 	case TypeMap:
-		keyType, valueType, n, err := p.ReadMapBegin(r)
+		keyType, valueType, n, err := r.ReadMapBegin()
 		if err != nil {
 			return nil, err
 		}
 
 		mp := make(map[interface{}]interface{})
 		for i := 0; i < n; i++ {
-			k, err := ReadValue(r, p, keyType)
+			k, err := ReadValue(r, keyType)
 			if err != nil {
 				return mp, err
 			}
-			v, err := ReadValue(r, p, valueType)
+			v, err := ReadValue(r, valueType)
 			if err != nil {
 				return mp, err
 			}
 			mp[k] = v
 		}
 
-		return mp, p.ReadMapEnd(r)
+		return mp, r.ReadMapEnd()
 	case TypeList:
-		valueType, n, err := p.ReadListBegin(r)
+		valueType, n, err := r.ReadListBegin()
 		if err != nil {
 			return nil, err
 		}
 		lst := make([]interface{}, 0)
 		for i := 0; i < n; i++ {
-			v, err := ReadValue(r, p, valueType)
+			v, err := ReadValue(r, valueType)
 			if err != nil {
 				return lst, err
 			}
 			lst = append(lst, v)
 		}
-		return lst, p.ReadListEnd(r)
+		return lst, r.ReadListEnd()
 	case TypeSet:
-		valueType, n, err := p.ReadSetBegin(r)
+		valueType, n, err := r.ReadSetBegin()
 		if err != nil {
 			return nil, err
 		}
 		set := make([]interface{}, 0)
 		for i := 0; i < n; i++ {
-			v, err := ReadValue(r, p, valueType)
+			v, err := ReadValue(r, valueType)
 			if err != nil {
 				return set, err
 			}
 			set = append(set, v)
 		}
-		return set, p.ReadSetEnd(r)
+		return set, r.ReadSetEnd()
 	}
 	return nil, errors.New("thrift: unknown type")
 }

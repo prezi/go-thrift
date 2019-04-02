@@ -1,4 +1,4 @@
-// Copyright 2012 Samuel Stauffer. All rights reserved.
+// Copyright 2012-2015 Samuel Stauffer. All rights reserved.
 // Use of this source code is governed by a 3-clause BSD
 // license that can be found in the LICENSE file.
 
@@ -9,6 +9,7 @@ import (
 	"unicode"
 )
 
+// CamelCase returns the string converted to camel case (e.g. some_name to SomeName)
 func CamelCase(s string) string {
 	prev := '_'
 	return strings.Map(

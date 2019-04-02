@@ -1,4 +1,4 @@
-// Copyright 2012 Samuel Stauffer. All rights reserved.
+// Copyright 2012-2015 Samuel Stauffer. All rights reserved.
 // Use of this source code is governed by a 3-clause BSD
 // license that can be found in the LICENSE file.
 
@@ -12,6 +12,7 @@ import (
 )
 
 const (
+	// DefaultMaxFrameSize is the default max size for frames when using the FramedReadWriteCloser
 	DefaultMaxFrameSize = 1024 * 1024
 )
 

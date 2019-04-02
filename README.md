@@ -13,29 +13,11 @@ License
 Overview
 --------
 
-So why another thrift package? While the existing one
-([thrift4go](https://github.com/pomack/thrift4go/)) works well, my philosophy
-is that interfaces should match the language. Most Thrift libraries try
-to match the API of the original which makes them awkward to use in
-other languages.
-
-As an example, Go already has the idea of a thrift transport in the
-ReadWriteCloser interfaces.
-
-Another design decision was to keep the generated code as terse as possible.
-The generator only creates a struct and the encoding/decoding is done through
-reflection. Annotations are used to set thrift ID for a field and options such
-as 'required'.
-
-Example struct:
-
-    type User struct {
-        Id        int64    `thrift:"1,required"`
-        Name      string   `thrift:"2"`
-        PostCount int32    `thrift:"3,keepempty"`
-        Flags     []string `thrift:"4"`
-        SomeSet   []string `thrift:"5,set"`
-    }
+Thrift is an IDL that can be used to generate RPC client and server
+bindings for a variety of languages. This package includes client and server
+codecs, serialization, and code generation for Go. It tries to be a more
+natural mapping to the language compared to other implementations. For instance,
+Go already has the idea of a thrift transport in the ReadWriteCloser interfaces.
 
 Types
 -----
@@ -95,16 +77,22 @@ How to use the generator:
     $ go install github.com/samuel/go-thrift/generator
 
     $ generator --help
-    Usage of parsimony: [options] inputfile outputpath
-      -go.binarystring=false: Always use string for binary instead of []byte
-      -go.json.enumnum=false: For JSON marshal enums by number instead of name
-      -go.pointers=false: Make all fields pointers
+    Usage of generator:
+      -go.binarystring
+            Always use string for binary instead of []byte
+      -go.importprefix string
+            Prefix for Thrift-generated go package imports
+      -go.json.enumnum
+            For JSON marshal enums by number instead of name
+      -go.pointers
+            Make all fields pointers
+      -go.signedbytes
+            Interpret Thrift byte as Go signed int8 type
 
-    $ mkdir $GOPATH/src/cassandra
     $ generator cassandra.thrift $GOPATH/src/
 
 TODO
 ----
 
-* "extends" for services
-* default values (is it worth it? maybe just annotations?)
+* default values
+* oneway requests on the server

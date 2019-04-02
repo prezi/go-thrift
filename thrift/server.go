@@ -1,4 +1,4 @@
-// Copyright 2012 Samuel Stauffer. All rights reserved.
+// Copyright 2012-2015 Samuel Stauffer. All rights reserved.
 // Use of this source code is governed by a 3-clause BSD
 // license that can be found in the LICENSE file.
 
@@ -9,35 +9,41 @@ import (
 	"io"
 	"net/rpc"
 	"strings"
+	"sync"
 )
 
 type serverCodec struct {
-	transport io.ReadWriteCloser
-	protocol  Protocol
-	nameCache map[string]string
+	conn       Transport
+	nameCache  map[string]string // incoming name -> registered name
+	methodName map[uint64]string // sequence ID -> method name
+	mu         sync.Mutex
 }
 
 // ServeConn runs the Thrift RPC server on a single connection. ServeConn blocks,
 // serving the connection until the client hangs up. The caller typically invokes
 // ServeConn in a go statement.
-func ServeConn(conn io.ReadWriteCloser, protocol Protocol) {
-	rpc.ServeCodec(NewServerCodec(conn, protocol))
+func ServeConn(conn Transport) {
+	rpc.ServeCodec(NewServerCodec(conn))
 }
 
 // NewServerCodec returns a new rpc.ServerCodec using Thrift RPC on conn using the specified protocol.
-func NewServerCodec(conn io.ReadWriteCloser, protocol Protocol) rpc.ServerCodec {
+func NewServerCodec(conn Transport) rpc.ServerCodec {
 	return &serverCodec{
-		transport: conn,
-		protocol:  protocol,
-		nameCache: make(map[string]string, 8),
+		conn:       conn,
+		nameCache:  make(map[string]string, 8),
+		methodName: make(map[uint64]string, 8),
 	}
 }
 
 func (c *serverCodec) ReadRequestHeader(request *rpc.Request) error {
-	name, messageType, seq, err := c.protocol.ReadMessageBegin(c.transport)
+	name, messageType, seq, err := c.conn.ReadMessageBegin()
 	if err != nil {
 		return err
 	}
+	if messageType != MessageTypeCall { // Currently don't support one way
+		return errors.New("thrift: expected Call message type")
+	}
+
 	// TODO: should use a limited size cache for the nameCache to avoid a possible
 	//       memory overflow from nefarious or broken clients
 	newName := c.nameCache[name]
@@ -48,30 +54,37 @@ func (c *serverCodec) ReadRequestHeader(request *rpc.Request) error {
 		}
 		c.nameCache[name] = newName
 	}
+
+	c.mu.Lock()
+	c.methodName[uint64(seq)] = name
+	c.mu.Unlock()
+
 	request.ServiceMethod = newName
 	request.Seq = uint64(seq)
-
-	if messageType != MessageTypeCall { // Currently don't support one way
-		return errors.New("thrift: exception Call message type")
-	}
 
 	return nil
 }
 
 func (c *serverCodec) ReadRequestBody(thriftStruct interface{}) error {
 	if thriftStruct == nil {
-		if err := SkipValue(c.transport, c.protocol, TypeStruct); err != nil {
+		if err := SkipValue(c.conn, TypeStruct); err != nil {
 			return err
 		}
 	} else {
-		if err := DecodeStruct(c.transport, c.protocol, thriftStruct); err != nil {
+		if err := DecodeStruct(c.conn, thriftStruct); err != nil {
 			return err
 		}
 	}
-	return c.protocol.ReadMessageEnd(c.transport)
+	return c.conn.ReadMessageEnd()
 }
 
 func (c *serverCodec) WriteResponse(response *rpc.Response, thriftStruct interface{}) error {
+	c.mu.Lock()
+	methodName := c.methodName[response.Seq]
+	delete(c.methodName, response.Seq)
+	c.mu.Unlock()
+	response.ServiceMethod = methodName
+
 	mtype := byte(MessageTypeReply)
 	if response.Error != "" {
 		mtype = MessageTypeException
@@ -81,23 +94,21 @@ func (c *serverCodec) WriteResponse(response *rpc.Response, thriftStruct interfa
 		}
 		thriftStruct = &ApplicationException{response.Error, etype}
 	}
-
-	methodname := strings.TrimPrefix(response.ServiceMethod, "Thrift.")
-	if err := c.protocol.WriteMessageBegin(c.transport, methodname, mtype, int32(response.Seq)); err != nil {
+	if err := c.conn.WriteMessageBegin(response.ServiceMethod, mtype, int32(response.Seq)); err != nil {
 		return err
 	}
-	if err := EncodeStruct(c.transport, c.protocol, thriftStruct); err != nil {
+	if err := EncodeStruct(c.conn, thriftStruct); err != nil {
 		return err
 	}
-	if err := c.protocol.WriteMessageEnd(c.transport); err != nil {
+	if err := c.conn.WriteMessageEnd(); err != nil {
 		return err
 	}
-	if flusher, ok := c.transport.(Flusher); ok {
-		return flusher.Flush()
-	}
-	return nil
+	return c.conn.Flush()
 }
 
 func (c *serverCodec) Close() error {
-	return c.transport.Close()
+	if cl, ok := c.conn.(io.Closer); ok {
+		return cl.Close()
+	}
+	return nil
 }

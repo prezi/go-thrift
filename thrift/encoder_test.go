@@ -1,4 +1,4 @@
-// Copyright 2012 Samuel Stauffer. All rights reserved.
+// Copyright 2012-2015 Samuel Stauffer. All rights reserved.
 // Use of this source code is governed by a 3-clause BSD
 // license that can be found in the LICENSE file.
 
@@ -7,9 +7,9 @@ package thrift
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"reflect"
 	"testing"
+	"time"
 )
 
 type TestStruct2 struct {
@@ -23,26 +23,26 @@ func (t *TestStruct2) String() string {
 
 type IntSet []int32
 
-func (s *IntSet) EncodeThrift(w io.Writer, p Protocol) error {
-	if err := p.WriteByte(w, byte(len(*s))); err != nil {
+func (s *IntSet) EncodeThrift(w ProtocolWriter) error {
+	if err := w.WriteByte(byte(len(*s))); err != nil {
 		return err
 	}
 	for _, v := range *s {
-		if err := p.WriteI32(w, v); err != nil {
+		if err := w.WriteI32(v); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *IntSet) DecodeThrift(r io.Reader, p Protocol) error {
-	l, err := p.ReadByte(r)
+func (s *IntSet) DecodeThrift(r ProtocolReader) error {
+	l, err := r.ReadByte()
 	if err != nil {
 		return err
 	}
 	sl := (*s)[:0]
 	for i := byte(0); i < l; i++ {
-		v, err := p.ReadI32(r)
+		v, err := r.ReadI32()
 		if err != nil {
 			return err
 		}
@@ -53,19 +53,20 @@ func (s *IntSet) DecodeThrift(r io.Reader, p Protocol) error {
 }
 
 type TestStruct struct {
-	String  string              `thrift:"1"`
-	Int     *int                `thrift:"2"`
-	List    []string            `thrift:"3"`
-	Map     map[string]string   `thrift:"4"`
-	Struct  *TestStruct2        `thrift:"5"`
-	List2   []*string           `thrift:"6"`
-	Struct2 TestStruct2         `thrift:"7"`
-	Binary  []byte              `thrift:"8"`
-	Set     []string            `thrift:"9,set"`
-	Set2    map[string]struct{} `thrift:"10"`
-	Set3    map[string]bool     `thrift:"11,set"`
-	Uint32  uint32              `thrift:"12"`
-	Uint64  uint64              `thrift:"13"`
+	String   string              `thrift:"1"`
+	Int      *int                `thrift:"2"`
+	List     []string            `thrift:"3"`
+	Map      map[string]string   `thrift:"4"`
+	Struct   *TestStruct2        `thrift:"5"`
+	List2    []*string           `thrift:"6"`
+	Struct2  TestStruct2         `thrift:"7"`
+	Binary   []byte              `thrift:"8"`
+	Set      []string            `thrift:"9,set"`
+	Set2     map[string]struct{} `thrift:"10"`
+	Set3     map[string]bool     `thrift:"11,set"`
+	Uint32   uint32              `thrift:"12"`
+	Uint64   uint64              `thrift:"13"`
+	Duration time.Duration       `thrift:"14"`
 }
 
 type TestStructRequiredOptional struct {
@@ -87,7 +88,7 @@ func TestKeepEmpty(t *testing.T) {
 	s := struct {
 		Str1 string `thrift:"1"`
 	}{}
-	err := EncodeStruct(buf, NewBinaryProtocol(true, false), s)
+	err := EncodeStruct(NewBinaryProtocolWriter(buf, true), s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +100,7 @@ func TestKeepEmpty(t *testing.T) {
 	s2 := struct {
 		Str1 string `thrift:"1,keepempty"`
 	}{}
-	err = EncodeStruct(buf, NewBinaryProtocol(true, false), s2)
+	err = EncodeStruct(NewBinaryProtocolWriter(buf, true), s2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +115,7 @@ func TestEncodeRequired(t *testing.T) {
 	s := struct {
 		Str1 string `thrift:"1,required"`
 	}{}
-	err := EncodeStruct(buf, NewBinaryProtocol(true, false), s)
+	err := EncodeStruct(NewBinaryProtocolWriter(buf, true), s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +127,7 @@ func TestEncodeRequired(t *testing.T) {
 	s2 := struct {
 		Str1 *string `thrift:"1,required"`
 	}{}
-	err = EncodeStruct(buf, NewBinaryProtocol(true, false), s2)
+	err = EncodeStruct(NewBinaryProtocolWriter(buf, true), s2)
 	_, ok := err.(*MissingRequiredField)
 	if !ok {
 		t.Fatalf("Missing required field should throw MissingRequiredField instead of %+v", err)
@@ -151,16 +152,17 @@ func TestBasics(t *testing.T) {
 		map[string]bool{"q": true, "p": false},
 		1<<31 + 2,
 		1<<63 + 2,
+		time.Second,
 	}
 	buf := &bytes.Buffer{}
 
-	err := EncodeStruct(buf, NewBinaryProtocol(true, false), s)
+	err := EncodeStruct(NewBinaryProtocolWriter(buf, true), s)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	s2 := &TestStruct{}
-	err = DecodeStruct(buf, NewBinaryProtocol(true, false), s2)
+	err = DecodeStruct(NewBinaryProtocolReader(buf, false), s2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +181,7 @@ func TestEncodeRequiredFields(t *testing.T) {
 	// encode nil pointer required field
 
 	s := &TestStructRequiredOptional{nil, "", nil, ""}
-	err := EncodeStruct(buf, NewBinaryProtocol(true, false), s)
+	err := EncodeStruct(NewBinaryProtocolWriter(buf, true), s)
 	if err == nil {
 		t.Fatal("Expected MissingRequiredField exception")
 	}
@@ -195,7 +197,7 @@ func TestEncodeRequiredFields(t *testing.T) {
 
 	str := "foo"
 	s = &TestStructRequiredOptional{&str, "", nil, ""}
-	err = EncodeStruct(buf, NewBinaryProtocol(true, false), s)
+	err = EncodeStruct(NewBinaryProtocolWriter(buf, true), s)
 	if err != nil {
 		t.Fatal("Empty non-pointer required fields shouldn't return an error")
 	}
@@ -205,13 +207,13 @@ func TestDecodeRequiredFields(t *testing.T) {
 	buf := &bytes.Buffer{}
 
 	s := &TestEmptyStruct{}
-	err := EncodeStruct(buf, NewBinaryProtocol(true, false), s)
+	err := EncodeStruct(NewBinaryProtocolWriter(buf, true), s)
 	if err != nil {
 		t.Fatal("Failed to encode empty struct")
 	}
 
 	s2 := &TestStructRequiredOptional{}
-	err = DecodeStruct(buf, NewBinaryProtocol(true, false), s2)
+	err = DecodeStruct(NewBinaryProtocolReader(buf, false), s2)
 	if err == nil {
 		t.Fatal("Expected MissingRequiredField exception")
 	}
@@ -229,13 +231,13 @@ func TestDecodeUnknownFields(t *testing.T) {
 
 	str := "foo"
 	s := &TestStructRequiredOptional{&str, str, &str, str}
-	err := EncodeStruct(buf, NewBinaryProtocol(true, false), s)
+	err := EncodeStruct(NewBinaryProtocolWriter(buf, true), s)
 	if err != nil {
 		t.Fatal("Failed to encode TestStructRequiredOptional struct")
 	}
 
 	s2 := &TestEmptyStruct{}
-	err = DecodeStruct(buf, NewBinaryProtocol(true, false), s2)
+	err = DecodeStruct(NewBinaryProtocolReader(buf, false), s2)
 	if err != nil {
 		t.Fatalf("Unknown fields during decode weren't ignored: %+v", err)
 	}
@@ -248,13 +250,13 @@ func TestDecodeCustom(t *testing.T) {
 	}
 
 	buf := &bytes.Buffer{}
-	err := EncodeStruct(buf, NewBinaryProtocol(true, false), st)
+	err := EncodeStruct(NewBinaryProtocolWriter(buf, true), st)
 	if err != nil {
 		t.Fatal("Failed to encode custom struct")
 	}
 
 	st2 := &testCustomStruct{}
-	err = DecodeStruct(buf, NewBinaryProtocol(true, false), st2)
+	err = DecodeStruct(NewBinaryProtocolReader(buf, false), st2)
 	if err != nil {
 		t.Fatalf("Custom fields during decode failed: %+v", err)
 	}
@@ -270,7 +272,7 @@ func BenchmarkEncodeEmptyStruct(b *testing.B) {
 	buf := nullWriter(0)
 	st := &struct{}{}
 	for i := 0; i < b.N; i++ {
-		EncodeStruct(buf, NewBinaryProtocol(true, false), st)
+		EncodeStruct(NewBinaryProtocolWriter(buf, true), st)
 	}
 }
 
@@ -278,11 +280,11 @@ func BenchmarkDecodeEmptyStruct(b *testing.B) {
 	b.StopTimer()
 	buf1 := &bytes.Buffer{}
 	st := &struct{}{}
-	EncodeStruct(buf1, NewBinaryProtocol(true, false), st)
+	EncodeStruct(NewBinaryProtocolWriter(buf1, true), st)
 	buf := bytes.NewBuffer(bytes.Repeat(buf1.Bytes(), b.N))
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		DecodeStruct(buf, NewBinaryProtocol(true, false), st)
+		DecodeStruct(NewBinaryProtocolReader(buf, false), st)
 	}
 }
 
@@ -296,7 +298,7 @@ func BenchmarkEncodeSimpleStruct(b *testing.B) {
 		Int: 123,
 	}
 	for i := 0; i < b.N; i++ {
-		EncodeStruct(buf, NewBinaryProtocol(true, false), st)
+		EncodeStruct(NewBinaryProtocolWriter(buf, true), st)
 	}
 }
 
@@ -313,6 +315,6 @@ func BenchmarkDecodeSimpleStruct(b *testing.B) {
 	buf := bytes.NewBuffer(bytes.Repeat(buf1.Bytes(), b.N))
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		DecodeStruct(buf, NewBinaryProtocol(true, false), st)
+		DecodeStruct(NewBinaryProtocolReader(buf, false), st)
 	}
 }
